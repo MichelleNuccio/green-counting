@@ -4,129 +4,88 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Verbs × Keywords in Architecture Syllabi</title>
-    <style>
-      :root { color-scheme: dark; }
-      * { box-sizing: border-box; }
-      html, body {
-        height: 100%; margin: 0;
-        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-        background: #777777; color: #ffffff;
-        display: flex; align-items: center; justify-content: center;
-      }
-      .card {
-        width: min(320px, 86vw); text-align: left;
-      }
-      .card h1 { font-size: 1.1rem; font-weight: 300; margin: 0 0 18px; color: #ffffff; }
-      .card .row { display: flex; gap: 8px; }
-      .card input {
-        flex: 1 1 auto; min-width: 0; font: inherit; font-size: 0.95rem; padding: 10px 12px;
-        border: 1px solid #ffffff; background: #474747;
-        color: #ffffff;
-      }
-      .card input::placeholder { color: #888888; }
-      .card input:focus { outline: 2px solid #ffffff; outline-offset: -1px; }
-      .card button {
-        flex: 0 0 auto; width: 42px; font: inherit; font-size: 1.15rem; padding: 10px 0;
-        border: 1px solid #ffffff; background: #ffffff; color: #363636; cursor: pointer;
-        display: flex; align-items: center; justify-content: center; line-height: 1;
-      }
-      .card button:disabled { opacity: 0.4; cursor: default; }
-      .card button:hover:not(:disabled) { background: #cccccc; }
-      #gate-error {
-        color: #ffffff; font-size: 0.84rem; margin-top: 12px;
-        visibility: hidden;
-      }
-      #gate-error.show { visibility: visible; }
-    </style>
+    <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <div class="card">
-      <h1>Verbs × Keywords in Architecture Syllabi</h1>
-      <form id="gate-form" autocomplete="off">
-        <div class="row">
-          <input id="gate-password" type="password" placeholder="Password" autocomplete="off" />
-          <button id="gate-submit" type="submit" aria-label="Unlock">&rarr;</button>
+    <div class="viz-root">
+      <header>
+        <div class="page-col">
+          <h1>
+            How do <span class="hl-verb">action words</span> pair with
+            <span class="hl-kw">topic words</span>?
+          </h1>
+          <p class="subtitle">
+            This site reads 347 syllabi sentence by sentence and groups their
+            <span class="hl-verb">verbs</span> and
+            <span class="hl-kw">keywords</span> into categories. The heatmap
+            shows which kinds of <span class="hl-verb">doing</span> are
+            associated with which kinds of <span class="hl-kw">topics</span>.
+            Hover over a cell to see the courses that use that pairing most;
+            click a cell to see how the pairing has changed over time; click any
+            course to see its full profile.
+            <button
+              type="button"
+              id="more-info-toggle"
+              class="more-info-toggle"
+            >
+              More information
+            </button>
+          </p>
+          <div id="more-info" class="more-info" hidden>
+            <h2>Implementation Details</h2>
+            <p>
+              Every syllabus was split into sentences and the quantity of words
+              in each verb and keyword category were counted. A sentence counts
+              toward a verb group when it uses one of that group's verbs, and
+              toward a keyword group when it mentions one of that group's topic
+              words. Words are lemmatized to match their dictionary base form,
+              and a word only counts as a keyword when it isn't being used as a
+              verb in that sentence — so "building a wall" counts as a verb,
+              while "the building" counts as a keyword. "Distinctiveness of
+              Association" compares how often two word groups actually share a
+              sentence with how often they would if the pairing were independent
+              — a methodology known as
+              <a
+                href="https://en.wikipedia.org/wiki/Pointwise_mutual_information"
+                target="_blank"
+                >Pointwise Mutual Information</a
+              >. The baseline is computed only over sentences that contain at
+              least one categorized word, so administrative boilerplate (dates,
+              grading policies, schedules) doesn't affect it.
+            </p>
+          </div>
+          <div class="nav-row">
+            <nav id="breadcrumb" aria-label="View navigation"></nav>
+            <label id="syllabus-picker-label">
+              View one course:
+              <select id="syllabus-picker">
+                <option value="">— choose —</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+          </div>
         </div>
-        <p id="gate-error">Incorrect password.</p>
-      </form>
+      </header>
+
+      <!-- Metric toggle disabled for now; uncomment to re-enable (the JS still supports it).
+  <div id="controls" class="controls-row">
+    <div id="metric-toggle" class="toggle-group" role="group" aria-label="Corpus metric">
+      <button type="button" data-metric="pmi" class="active">Distinctiveness of Association</button>
+      <button type="button" data-metric="count">Number of Sentences</button>
     </div>
-    <script>
-(function () {
-  "use strict";
-  var ITERATIONS = 310000;
-  var SALT_B64 = "QoeOymu6jpUtkAIjvLxNRQ==";
-  var IV_B64 = "YultU+Bptt8xawuS";
-  var DATA_B64 = "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";
+  </div>
+  -->
 
-  var stylePreload = fetch("style.css").catch(function () {});
+      <main>
+        <section id="view-corpus" class="view"></section>
+        <section id="view-cell" class="view" hidden></section>
+        <section id="view-syllabus" class="view" hidden></section>
+      </main>
 
-  function b64ToBytes(b64) {
-    var bin = atob(b64);
-    var bytes = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return bytes;
-  }
-
-  function reveal(html, password) {
-    var withPw = html.split("__PASSWORD__").join(encodeURIComponent(password));
-    document.open();
-    document.write(withPw);
-    document.close();
-  }
-
-  function attempt(password, onFail) {
-    var enc = new TextEncoder();
-    var decrypted = window.crypto.subtle
-      .importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveKey"])
-      .then(function (baseKey) {
-        return window.crypto.subtle.deriveKey(
-          { name: "PBKDF2", salt: b64ToBytes(SALT_B64), iterations: ITERATIONS, hash: "SHA-256" },
-          baseKey,
-          { name: "AES-GCM", length: 256 },
-          false,
-          ["decrypt"]
-        );
-      })
-      .then(function (key) {
-        return window.crypto.subtle.decrypt(
-          { name: "AES-GCM", iv: b64ToBytes(IV_B64) },
-          key,
-          b64ToBytes(DATA_B64)
-        );
-      })
-      .then(function (plainBuf) { return new TextDecoder().decode(plainBuf); });
-    Promise.all([decrypted, stylePreload])
-      .then(function (results) { reveal(results[0], password); })
-      .catch(onFail);
-  }
-
-  function wireForm() {
-    var form = document.getElementById("gate-form");
-    var input = document.getElementById("gate-password");
-    var err = document.getElementById("gate-error");
-    var btn = document.getElementById("gate-submit");
-    form.addEventListener("submit", function (e) {
-      e.preventDefault();
-      err.classList.remove("show");
-      btn.disabled = true;
-      attempt(input.value, function () {
-        err.classList.add("show");
-        btn.disabled = false;
-        input.select();
-      });
-    });
-    input.focus();
-  }
-
-  wireForm();
-
-  // A parent frame that already unlocked can pass the password along via
-  // the URL hash (never sent to the server) so this page unlocks silently
-  // instead of asking again. Direct navigation here with no hash still
-  // shows the normal prompt above.
-  var m = /(?:^#|[#&])pw=([^&]+)/.exec(window.location.hash || "");
-  if (m) attempt(decodeURIComponent(m[1]), function () {});
-})();
-    </script>
+      <div id="tooltip" role="tooltip" hidden></div>
+    </div>
+    <script src="data.js"></script>
+    <script src="drive_ids.js"></script>
+    <script src="app.js"></script>
   </body>
 </html>

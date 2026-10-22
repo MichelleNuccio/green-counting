@@ -27,8 +27,38 @@
   // Alphabetical display order; "local" column dropped
   const VERB_CATS = [...D.verb_cats].sort((a, b) => vName(a).localeCompare(vName(b)));
   const KW_CATS = D.kw_cats.filter((k) => !HIDDEN_KW_CATS.has(k)).sort();
+  const CORPUS_PANELS = [
+    { row: 0, column: 0, macroCategory: "Design Studio" },
+    { row: 0, column: 1, macroCategory: "Professional Practice" },
+    { row: 1, column: 0, macroCategory: "Technology & Representation" },
+    { row: 1, column: 1, macroCategory: "History & Theory" },
+  ].map((panel) => ({
+    ...panel,
+    verbs: VERB_CATS,
+    keywords: KW_CATS,
+    syllabi: [],
+    corpus: null,
+  }));
+  const MACRO_CATEGORY_NAMES = new Set(CORPUS_PANELS.map((panel) => panel.macroCategory));
+  const CORPUS_MODES = [
+    { id: "compared", label: "Compared categories" },
+    { id: "all", label: "All categories" },
+    ...CORPUS_PANELS.map((panel) => ({
+      id: panel.macroCategory.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
+      label: panel.macroCategory,
+      macroCategory: panel.macroCategory,
+    })),
+  ];
+  const CORPUS_MODE_BY_ID = new Map(CORPUS_MODES.map((mode) => [mode.id, mode]));
 
-  const state = { view: "corpus", metric: "pmi", cell: null, syl: null };
+  const state = {
+    view: "corpus",
+    corpusMode: "compared",
+    corpusSyllabusIndex: null,
+    metric: "pmi",
+    cell: null,
+    syl: null,
+  };
 
   const $ = (sel) => document.querySelector(sel);
   const viewCorpus = $("#view-corpus");
@@ -36,6 +66,11 @@
   const viewSyl = $("#view-syllabus");
   const tooltip = $("#tooltip");
   const breadcrumb = $("#breadcrumb");
+  const picker = $("#syllabus-picker");
+  const pickerLabel = $("#syllabus-picker-label");
+  const sortedSyllabi = D.syllabi
+    .map((syllabus, index) => ({ syllabus, index }))
+    .sort((a, b) => a.syllabus.y - b.syllabus.y || a.syllabus.s.localeCompare(b.syllabus.s));
 
   const key = (v, k) => v + "|" + k;
   const log2 = (x) => Math.log(x) / Math.LN2;
@@ -47,16 +82,135 @@
     return (Math.round(r * 10) / 10) + "×";
   }
 
+  function parseCsvRow(line, lineNumber) {
+    const fields = [];
+    let field = "";
+    let quoted = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (quoted) {
+        if (char === '"' && line[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else if (char === '"') {
+          quoted = false;
+        } else {
+          field += char;
+        }
+      } else if (char === ",") {
+        fields.push(field.trim());
+        field = "";
+      } else if (char === '"' && field.length === 0) {
+        quoted = true;
+      } else if (char === '"') {
+        throw new Error(`Unexpected quote on line ${lineNumber}.`);
+      } else {
+        field += char;
+      }
+    }
+    if (quoted) throw new Error(`Unclosed quoted field on line ${lineNumber}.`);
+    fields.push(field.trim());
+    return fields;
+  }
+
+  function normalizePdfFilename(filename) {
+    const basename = filename.trim().split(/[\\/]/).pop();
+    return basename.replace(/\.pdf$/i, "");
+  }
+
+  function aggregateSyllabi(syllabi) {
+    const corpus = {
+      total_sentences: 0,
+      active_sentences: 0,
+      v: Object.create(null),
+      k: Object.create(null),
+      c: Object.create(null),
+    };
+    for (const syllabus of syllabi) {
+      corpus.total_sentences += syllabus.n;
+      // Older generated data lacks this per-syllabus total, so use all sentences.
+      corpus.active_sentences += syllabus.active_sentences ?? syllabus.n;
+      for (const [category, count] of Object.entries(syllabus.v))
+        corpus.v[category] = (corpus.v[category] || 0) + count;
+      for (const [category, count] of Object.entries(syllabus.k))
+        corpus.k[category] = (corpus.k[category] || 0) + count;
+      for (const [pair, count] of Object.entries(syllabus.c))
+        corpus.c[pair] = (corpus.c[pair] || 0) + count;
+    }
+    return corpus;
+  }
+
+  function corpusModeForSyllabus(index) {
+    const syllabus = D.syllabi[index];
+    if (!syllabus) return null;
+    const panel = CORPUS_PANELS.find((candidate) => candidate.syllabi.includes(syllabus));
+    return panel && CORPUS_MODES.find((mode) => mode.macroCategory === panel.macroCategory);
+  }
+
+  async function loadMacroCategories() {
+    const paths = ["../data/macro-categories.csv", "../../data/macro-categories.csv"];
+    const failures = [];
+    let csvText;
+    for (const path of paths) {
+      try {
+        const response = await fetch(path);
+        if (!response.ok) {
+          failures.push(`${path}: HTTP ${response.status}`);
+          continue;
+        }
+        csvText = await response.text();
+        break;
+      } catch (error) {
+        failures.push(`${path}: ${error.message}`);
+      }
+    }
+    if (csvText === undefined)
+      throw new Error(`Could not load macro-categories.csv. Tried ${failures.join("; ")}.`);
+
+    const lines = csvText.replace(/^\uFEFF/, "").split(/\r?\n/);
+    const header = parseCsvRow(lines.shift() || "", 1);
+    if (header.length !== 2 || header[0] !== "pdf_filename" || header[1] !== "macro_category")
+      throw new Error("Expected CSV columns: pdf_filename,macro_category.");
+
+    const syllabiByFilename = new Map(
+      D.syllabi.map((syllabus) => [normalizePdfFilename(syllabus.t), syllabus]),
+    );
+    const categoriesByFilename = new Map();
+    let assignmentCount = 0;
+    for (let index = 0; index < lines.length; index++) {
+      if (!lines[index].trim()) continue;
+      const lineNumber = index + 2;
+      const row = parseCsvRow(lines[index], lineNumber);
+      if (row.length !== 2 || !row[0] || !row[1])
+        throw new Error(`Expected a filename and category on line ${lineNumber}.`);
+      const filename = normalizePdfFilename(row[0]);
+      if (!MACRO_CATEGORY_NAMES.has(row[1]))
+        throw new Error(`Unknown macro-category "${row[1]}" on line ${lineNumber}.`);
+      if (!syllabiByFilename.has(filename))
+        throw new Error(`PDF "${row[0]}" on line ${lineNumber} is not in the loaded syllabus data.`);
+      if (categoriesByFilename.has(filename))
+        throw new Error(`Duplicate PDF "${row[0]}" on line ${lineNumber}.`);
+      categoriesByFilename.set(filename, row[1]);
+      assignmentCount++;
+    }
+    if (!assignmentCount) throw new Error("macro-categories.csv contains no PDF assignments.");
+
+    for (const panel of CORPUS_PANELS) {
+      panel.syllabi = D.syllabi.filter((syllabus) =>
+        categoriesByFilename.get(normalizePdfFilename(syllabus.t)) === panel.macroCategory);
+      panel.corpus = aggregateSyllabi(panel.syllabi);
+    }
+  }
+
   // ── Derived stats ────────────────────────────────────────────────────────
-  function corpusCell(v, k) {
-    const a = D.corpus.c[key(v, k)] || 0;
-    const va = D.corpus.v[v] || 0;
-    const ka = D.corpus.k[k] || 0;
-    const n = D.corpus.total_sentences;
-    // "Chance" is measured only over sentences that contain at least one
-    // categorized word, so administrative boilerplate (dates, policies)
-    // doesn't inflate every pairing above 1×.
-    const nA = D.corpus.active_sentences || n;
+  function corpusCell(v, k, corpus = D.corpus) {
+    const a = corpus.c[key(v, k)] || 0;
+    const va = corpus.v[v] || 0;
+    const ka = corpus.k[k] || 0;
+    const n = corpus.total_sentences;
+    // Use the active-sentence baseline when available; older per-syllabus
+    // data falls back to all sentences in that filtered cohort.
+    const nA = corpus.active_sentences || n;
     let ratio = null; // observed co-occurrence vs pure chance
     if (a > 0 && va > 0 && ka > 0) ratio = (a * nA) / (va * ka);
     return { a, va, ka, n, ratio };
@@ -93,8 +247,8 @@
     return { a, ratio: (a * s.n) / (va * ka) };
   }
 
-  function topSyllabi(v, k, limit) {
-    return D.syllabi
+  function topSyllabi(v, k, limit, syllabi = D.syllabi) {
+    return syllabi
       .map((s, i) => ({ s, i, ...sylRate(s, v, k) }))
       .filter((r) => r.a >= MIN_SYL_COOCCUR)
       .sort((x, y) => y.rate - x.rate)
@@ -124,11 +278,11 @@
   // Texts the pairing's courses cite unusually often: ranked by how much more
   // common a text is among these courses than among all courses, so corpus-wide
   // bestsellers don't automatically dominate every pairing.
-  function topCitations(v, k, limit) {
+  function topCitations(v, k, limit, syllabi = D.syllabi) {
     const base = citeBase();
     const counts = new Map();
     let nPair = 0;
-    for (const s of D.syllabi) {
+    for (const s of syllabi) {
       if ((s.c[key(v, k)] || 0) < MIN_SYL_COOCCUR) continue;
       if (!s.refs || !s.refs.length) continue;
       nPair++;
@@ -228,6 +382,18 @@
     node.addEventListener("blur", hideTooltip);
   }
 
+  function setCorpusComparison(grid, pair) {
+    grid.classList.add("has-comparison");
+    for (const cell of grid.querySelectorAll("td.cell"))
+      cell.classList.toggle("is-comparison-match", cell.dataset.comparisonPair === pair);
+  }
+
+  function clearCorpusComparison(grid) {
+    grid.classList.remove("has-comparison");
+    for (const cell of grid.querySelectorAll("td.cell"))
+      cell.classList.remove("is-comparison-match");
+  }
+
   // ── Category words helpers ───────────────────────────────────────────────
   const topWords = (list, n) => (list || []).slice(0, n).map((w) => w[0]);
   const allWords = (list) => (list || []).map((w) => w[0]);
@@ -293,11 +459,35 @@
     viewCorpus.hidden = view !== "corpus";
     viewCell.hidden = view !== "cell";
     viewSyl.hidden = view !== "syllabus";
+    updateSyllabusPicker();
     const toggle = $("#metric-toggle");
     if (toggle) toggle.style.visibility = view === "corpus" ? "visible" : "hidden";
     hideTooltip();
     renderBreadcrumb();
     syncPageWidth();
+  }
+
+  function updateSyllabusPicker() {
+    const mode = CORPUS_MODE_BY_ID.get(state.corpusMode);
+    const panel = mode.macroCategory
+      ? CORPUS_PANELS.find((candidate) => candidate.macroCategory === mode.macroCategory)
+      : null;
+    const syllabi = mode.id === "all"
+      ? sortedSyllabi
+      : panel
+        ? sortedSyllabi.filter(({ syllabus }) => panel.syllabi.includes(syllabus))
+        : [];
+    const selectedIndex = state.corpusSyllabusIndex
+      ?? (state.view === "syllabus" ? state.syl : null);
+    pickerLabel.hidden = mode.id === "compared";
+    picker.replaceChildren(new Option("— choose —", ""), new Option("All", "all"));
+    for (const { syllabus, index } of syllabi) {
+      const option = new Option(syllabus.s, String(index));
+      option.selected = selectedIndex === index;
+      picker.appendChild(option);
+    }
+    if (selectedIndex !== null && !syllabi.some(({ index }) => index === selectedIndex))
+      picker.value = "";
   }
 
   // ── Navigation history (so the browser back/forward buttons step back
@@ -306,7 +496,9 @@
   // Each of these renders the view AND (when push is true, i.e. the user
   // just clicked something) records it as a new history entry; popstate
   // replays the same functions with push=false so restoring never re-pushes.
-  function goCorpus(push) {
+  function goCorpus(push, mode = state.corpusMode, syllabusIndex = null) {
+    state.corpusMode = CORPUS_MODE_BY_ID.has(mode) ? mode : "compared";
+    state.corpusSyllabusIndex = syllabusIndex;
     state.cell = null; state.syl = null;
     renderCorpus();
     setView("corpus");
@@ -328,7 +520,9 @@
     if (state.view === "cell" && state.cell)
       return "#cell/" + encodeURIComponent(state.cell[0]) + "/" + encodeURIComponent(state.cell[1]);
     if (state.view === "syllabus" && state.syl !== null) return "#syllabus/" + state.syl;
-    return "#corpus";
+    if (state.corpusSyllabusIndex !== null)
+      return "#corpus/" + state.corpusMode + "/syllabus/" + state.corpusSyllabusIndex;
+    return state.corpusMode === "compared" ? "#corpus" : "#corpus/" + state.corpusMode;
   }
   function pushHistory() {
     const hash = hashFor();
@@ -336,6 +530,21 @@
   }
   function applyHash() {
     const parts = location.hash.slice(1).split("/");
+    if (parts[0] === "corpus" && parts.length <= 2) {
+      const mode = parts.length === 2 && CORPUS_MODE_BY_ID.has(parts[1])
+        ? parts[1]
+        : "compared";
+      goCorpus(false, mode);
+      return;
+    }
+    if (parts[0] === "corpus" && parts.length === 4 && parts[2] === "syllabus") {
+      const mode = CORPUS_MODE_BY_ID.get(parts[1]);
+      const index = Number(parts[3]);
+      if (mode && Number.isInteger(index) && corpusModeForSyllabus(index)?.id === mode.id) {
+        goCorpus(false, mode.id, index);
+        return;
+      }
+    }
     if (parts[0] === "cell" && parts.length === 3) {
       const v = decodeURIComponent(parts[1]), k = decodeURIComponent(parts[2]);
       if (VERB_CATS.includes(v) && KW_CATS.includes(k)) { goCell(v, k, false); return; }
@@ -348,11 +557,17 @@
 
   function renderBreadcrumb() {
     breadcrumb.replaceChildren();
-    const root = el("a", null, "All categories");
-    root.setAttribute("tabindex", "0");
-    root.addEventListener("click", () => { goCorpus(true); });
-    root.addEventListener("keydown", (e) => { if (e.key === "Enter") root.click(); });
-    breadcrumb.appendChild(root);
+    for (const mode of CORPUS_MODES) {
+      const link = el("a", "category-nav-link", mode.label);
+      link.href = mode.id === "compared" ? "#corpus" : "#corpus/" + mode.id;
+      link.setAttribute("aria-current", state.corpusMode === mode.id ? "page" : "false");
+      link.classList.toggle("active", state.corpusMode === mode.id);
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        goCorpus(true, mode.id);
+      });
+      breadcrumb.appendChild(link);
+    }
     if (state.view === "cell" && state.cell) {
       breadcrumb.appendChild(el("span", "sep", "›"));
       breadcrumb.appendChild(el("span", null, vName(state.cell[0]) + " × " + state.cell[1]));
@@ -407,15 +622,40 @@
   function renderCorpus() {
     viewCorpus.replaceChildren();
     const isPmi = state.metric === "pmi";
+    const isCompared = state.corpusMode === "compared";
+    const selectedMode = CORPUS_MODE_BY_ID.get(state.corpusMode);
+    const selectedSyllabus = state.corpusSyllabusIndex === null
+      ? null
+      : D.syllabi[state.corpusSyllabusIndex];
+    const categoryPanel = selectedMode.macroCategory
+      ? CORPUS_PANELS.find((panel) => panel.macroCategory === selectedMode.macroCategory)
+      : null;
+    const panels = isCompared
+      ? CORPUS_PANELS
+      : [{
+        row: 0,
+        column: 0,
+        macroCategory: selectedMode.id === "all" ? "All categories" : selectedMode.macroCategory,
+        verbs: VERB_CATS,
+        keywords: KW_CATS,
+        syllabi: selectedSyllabus
+          ? [selectedSyllabus]
+          : selectedMode.id === "all" ? D.syllabi : categoryPanel.syllabi,
+        corpus: selectedMode.id === "all"
+          ? D.corpus
+          : selectedSyllabus
+            ? aggregateSyllabi([selectedSyllabus])
+            : categoryPanel.corpus,
+      }];
 
     let vmaxLog = 0, vmaxCount = 0;
-    const cells = {};
-    for (const v of VERB_CATS) for (const k of KW_CATS) {
-      const c = corpusCell(v, k);
-      cells[key(v, k)] = c;
-      if (c.a >= MIN_COOCCUR && c.ratio !== null)
-        vmaxLog = Math.max(vmaxLog, Math.abs(log2(c.ratio)));
-      vmaxCount = Math.max(vmaxCount, c.a);
+    for (const panel of panels) {
+      for (const v of panel.verbs) for (const k of panel.keywords) {
+        const c = corpusCell(v, k, panel.corpus);
+        if (c.a >= MIN_COOCCUR && c.ratio !== null)
+          vmaxLog = Math.max(vmaxLog, Math.abs(log2(c.ratio)));
+        vmaxCount = Math.max(vmaxCount, c.a);
+      }
     }
     vmaxLog = vmaxLog || 1;
     vmaxCount = vmaxCount || 1;
@@ -425,18 +665,23 @@
     const corpusH2 = el("h2");
     corpusH2.appendChild(document.createTextNode(
       (isPmi ? "Distinctiveness of Association: " : "Number of Sentences: ")));
-    corpusH2.appendChild(el("strong", null, "all syllabi"));
+    corpusH2.appendChild(el("strong", null, panels.length === 1
+      ? panels[0].macroCategory
+      : "by macro-category"));
     titleBlock.appendChild(corpusH2);
     titleBlock.appendChild(el("p", "view-sub", isPmi
-      ? "Each cell compares how often the two word categories share a sentence throughout the entire dataset with how " +
-        "often they would by pure chance. Red means the pairing is dependent; the presence of one word group " +
-        "is positively associated with the other (2× = twice as often as random chance). Blue means " +
-        "the pairing is negatively associated; the presense of one group makes the other less likely in " +
-        "the same sentence (0.5× = half as often as random chance). White (1×) signifies independence between the groups. Hover to see " +
-        "the courses that use a pairing most and the texts they cite; click to see more information about that pairing."
+      ? "Each cell compares how often the two word categories share a sentence " +
+        (isCompared ? "within that panel's assigned syllabi" : "within the selected dataset") + " with how " +
+        "often they would by pure chance. Magenta means positive association (2× = twice as often as chance); yellow means " +
+        "negative association (0.5× = half as often as chance); neutral means independence (1×). Hover to see " +
+        (isCompared ? "the courses from that panel's category" : "the courses in this dataset") +
+        " that use a pairing most and the texts they cite; click to see more information about that pairing."
       : "The plain count of sentences where the two groups appear together. Read this " +
         "alongside the distinctiveness view: a striking pairing backed by only a handful " +
         "of sentences is a thinner finding."));
+    if (selectedSyllabus)
+      titleBlock.appendChild(el("p", "view-sub corpus-filter-note",
+        `Showing only ${selectedSyllabus.s} from ${selectedMode.macroCategory}.`));
     headRow.appendChild(titleBlock);
     headRow.appendChild(isPmi
       ? legend(`linear-gradient(to right, var(--div-neg), var(--div-mid) 50%, var(--div-pos))`,
@@ -445,30 +690,88 @@
                "0 sentences", null, vmaxCount + " sentences"));
     viewCorpus.appendChild(headRow);
 
+    const xAxis = el("div", "corpus-axis-x");
+    xAxis.appendChild(hlKw("Keywords"));
+    const matrix = el("div", "corpus-grid");
+    if (!isCompared) matrix.classList.add("single-panel");
+    for (const panel of panels)
+      matrix.appendChild(renderCorpusPanel(panel, isPmi, vmaxLog, vmaxCount, matrix, isCompared));
+
+    const yAxis = el("div", "corpus-axis-y");
+    yAxis.appendChild(hlVerb("Verbs"));
+    const chart = el("div", "corpus-chart");
+    chart.appendChild(yAxis);
+    chart.appendChild(matrix);
+    viewCorpus.appendChild(xAxis);
+    viewCorpus.appendChild(chart);
+  }
+
+  function renderCorpusPanel(panel, isPmi, vmaxLog, vmaxCount, matrix, enableComparison = true) {
+    const section = el("section", "corpus-panel");
+    section.classList.add(panel.row === 0 ? "corpus-panel-top" : "corpus-panel-bottom");
+    section.classList.add(panel.column === 0 ? "corpus-panel-left" : "corpus-panel-right");
+    section.setAttribute("aria-label", `${panel.macroCategory} heatmap`);
+    section.appendChild(el("h3", "corpus-panel-title", panel.macroCategory));
+    section.appendChild(el("p", "corpus-panel-count",
+      `${panel.syllabi.length} ${panel.syllabi.length === 1 ? "document" : "documents"}`));
+    if (!panel.syllabi.length)
+      section.appendChild(el("p", "corpus-panel-empty", "No documents assigned yet"));
+
     const table = el("table", "heatmap");
+    const colgroup = el("colgroup");
+    const labelColumn = el("col", "category-column");
+    colgroup.appendChild(labelColumn);
+    for (let i = 0; i < panel.keywords.length; i++)
+      colgroup.appendChild(el("col", "keyword-column"));
+    table.appendChild(colgroup);
+
     const thead = el("thead");
     const hr = el("tr");
-    hr.appendChild(el("th"));
-    for (const k of KW_CATS)
+    if (panel.column === 0) {
+      hr.appendChild(el("th"));
+    } else {
+      hr.appendChild(el("th", "category-spacer"));
+    }
+    for (const k of panel.keywords)
       hr.appendChild(headerCell("th", k, D.kw_words[k], "keywords", "hl-kw"));
     thead.appendChild(hr);
     table.appendChild(thead);
 
     const tbody = el("tbody");
-    for (const v of VERB_CATS) {
+    for (const v of panel.verbs) {
       const tr = el("tr");
-      tr.appendChild(headerCell("th", vName(v), D.verb_words[v], "verbs", "hl-verb"));
-      for (const k of KW_CATS) {
-        const c = cells[key(v, k)];
+      if (panel.column === 0) {
+        tr.appendChild(headerCell("th", vName(v), D.verb_words[v], "verbs", "hl-verb"));
+      } else {
+        const label = headerCell("th", vName(v), D.verb_words[v], "verbs", "hl-verb");
+        label.classList.add("category-duplicate");
+        tr.appendChild(label);
+      }
+      for (const k of panel.keywords) {
+        const c = corpusCell(v, k, panel.corpus);
         const td = el("td", "cell");
-        td.setAttribute("tabindex", "0");
-        if (c.a < MIN_COOCCUR || c.ratio === null) {
+        if (!panel.syllabi.length) {
+          td.classList.add("no-data");
+          td.setAttribute("aria-hidden", "true");
+        } else {
+          td.setAttribute("tabindex", "0");
+          td.dataset.comparisonPair = key(v, k);
+          if (enableComparison) {
+            td.addEventListener("pointerenter", () => setCorpusComparison(matrix, td.dataset.comparisonPair));
+            td.addEventListener("pointerleave", () => clearCorpusComparison(matrix));
+            td.addEventListener("focus", () => setCorpusComparison(matrix, td.dataset.comparisonPair));
+            td.addEventListener("blur", () => clearCorpusComparison(matrix));
+          }
+        }
+        if (!panel.syllabi.length) {
+          td.textContent = "";
+        } else if (c.a < MIN_COOCCUR || c.ratio === null) {
           td.classList.add("na");
           td.textContent = "·";
         } else if (isPmi) {
           const t = log2(c.ratio) / vmaxLog;
           td.style.background = divColor(t);
-          td.style.color = inkFor(Math.abs(t));
+          td.style.color = "var(--div-ink)";
           td.textContent = fmtRatio(c.ratio);
         } else {
           const t = c.a / vmaxCount;
@@ -476,43 +779,47 @@
           td.style.color = inkFor(t);
           td.textContent = String(c.a);
         }
-        const activate = () => { goCell(v, k, true); };
-        td.addEventListener("click", activate);
-        td.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); } });
-        attachHover(td, (tt) => {
-          tt.appendChild(pairTitle(v, k));
-          tt.appendChild(el("div", "tt-label",
-            c.ratio === null ? "never appear together"
-              : fmtRatio(c.ratio) + " as often as chance · " + c.a + " sentences"));
-          const top = topSyllabi(v, k, 10);
-          if (top.length) {
-            tt.appendChild(el("hr"));
-            tt.appendChild(el("div", "tt-label", "Courses that use this pairing most (sentences per 100):"));
-            const ul = el("ul", "tt-list");
-            for (const r of top) {
-              const li = el("li");
-              li.appendChild(el("span", "name", r.s.s));
-              li.appendChild(el("span", null, r.rate.toFixed(1)));
-              ul.appendChild(li);
+        if (panel.syllabi.length) {
+          const activate = () => { goCell(v, k, true); };
+          td.addEventListener("click", activate);
+          td.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); } });
+          attachHover(td, (tt) => {
+            tt.appendChild(pairTitle(v, k));
+            tt.appendChild(el("div", "tt-label",
+              c.ratio === null ? "never appear together"
+                : fmtRatio(c.ratio) + " as often as chance · " + c.a + " sentences"));
+            const top = topSyllabi(v, k, 10, panel.syllabi);
+            if (top.length) {
+              tt.appendChild(el("hr"));
+              tt.appendChild(el("div", "tt-label", "Courses in this category that use this pairing most (sentences per 100):"));
+              const ul = el("ul", "tt-list");
+              for (const r of top) {
+                const li = el("li");
+                li.appendChild(el("span", "name", r.s.s));
+                li.appendChild(el("span", null, r.rate.toFixed(1)));
+                ul.appendChild(li);
+              }
+              tt.appendChild(ul);
             }
-            tt.appendChild(ul);
-          }
-          const cites = topCitations(v, k, 3);
-          if (cites.length) {
-            tt.appendChild(el("hr"));
-            tt.appendChild(el("div", "tt-label", "Texts these courses often cite:"));
-            for (const e of cites) {
-              const title = e.title.length > 60 ? e.title.slice(0, 57) + "…" : e.title;
-              tt.appendChild(el("div", "tt-label tt-cite", title + " (" + e.n + " courses)"));
+            const cites = topCitations(v, k, 3, panel.syllabi);
+            if (cites.length) {
+              tt.appendChild(el("hr"));
+              tt.appendChild(el("div", "tt-label", "Texts these courses often cite:"));
+              for (const e of cites) {
+                const title = e.title.length > 60 ? e.title.slice(0, 57) + "…" : e.title;
+                tt.appendChild(el("div", "tt-label tt-cite", title + " (" + e.n + " courses)"));
+              }
             }
-          }
-        });
+          });
+        }
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
-    viewCorpus.appendChild(withAxes(table));
+    table.addEventListener("pointerleave", hideTooltip);
+    section.appendChild(table);
+    return section;
   }
 
   // ── Pairing view (one verb group × one keyword group, over time) ─────────
@@ -703,6 +1010,9 @@
       "often the two groups share a sentence in this course than they'd be expected to by " +
       "pure coincidence. Red signifies positive association, blue signifies negative association. A dot means the pairing shows " +
       "up too rarely in this course to judge. Click any cell to see that pairing across all courses."));
+    if (!corpusModeForSyllabus(i))
+      titleBlock.appendChild(el("p", "view-sub macro-category-status",
+        "This course has not been assigned to a macro-category yet, so its individual course view is shown."));
     headRow.appendChild(titleBlock);
     headRow.appendChild(legend(
       `linear-gradient(to right, var(--div-neg), var(--div-mid) 50%, var(--div-pos))`,
@@ -733,7 +1043,7 @@
         } else {
           const t = log2(r) / vmaxLog;
           td.style.background = divColor(t);
-          td.style.color = inkFor(Math.abs(t));
+          td.style.color = "var(--div-ink)";
           td.textContent = fmtRatio(r);
         }
         const activate = () => { goCell(v, k, true); };
@@ -794,20 +1104,21 @@
     moreInfoToggle.textContent = showing ? "Less information" : "More information";
   });
 
-  const picker = $("#syllabus-picker");
-  D.syllabi
-    .map((s, i) => ({ s, i }))
-    .sort((a, b) => a.s.y - b.s.y || a.s.s.localeCompare(b.s.s))
-    .forEach(({ s, i }) => {
-      const opt = document.createElement("option");
-      opt.value = String(i);
-      opt.textContent = s.s;
-      picker.appendChild(opt);
-    });
   picker.addEventListener("change", () => {
     if (picker.value === "") return;
-    state.cell = null;
-    goSyllabus(Number(picker.value), true);
+    if (picker.value === "all") {
+      const activeMode = CORPUS_MODE_BY_ID.get(state.corpusMode);
+      goCorpus(true, activeMode.macroCategory ? activeMode.id : "compared");
+      return;
+    }
+    const index = Number(picker.value);
+    const mode = corpusModeForSyllabus(index);
+    if (mode) {
+      goCorpus(true, mode.id, index);
+    } else {
+      state.cell = null;
+      goSyllabus(index, true);
+    }
   });
 
   // Tell the parent shell (if embedded in one -- see web/index.html) to hide
@@ -859,5 +1170,13 @@
 
   // ── Init ─────────────────────────────────────────────────────────────────
   window.addEventListener("popstate", applyHash);
-  applyHash();
+  viewCorpus.replaceChildren(el("p", "view-sub macro-category-status", "Loading macro-categories.csv…"));
+  loadMacroCategories()
+    .then(applyHash)
+    .catch((error) => {
+      console.error("Could not initialize the macro-category heatmaps.", error);
+      viewCorpus.replaceChildren(el("p", "view-sub macro-category-status",
+        `Could not load macro-categories.csv: ${error.message}`));
+      setView("corpus");
+    });
 })();

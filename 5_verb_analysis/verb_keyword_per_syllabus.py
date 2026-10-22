@@ -170,6 +170,7 @@ def main():
         kcat_n: collections.Counter = collections.Counter()
         cell_n: collections.Counter = collections.Counter()
         n_sents = 0
+        active_sents = 0
         for sent in doc.sents:
             n_sents += 1
             vcats_here, kcats_here = set(), set()
@@ -192,6 +193,7 @@ def main():
                             kw_word_counts[c][word] += 1
             if vcats_here or kcats_here:
                 corpus_active_sentences += 1
+                active_sents += 1
             for v in vcats_here:
                 vcat_n[v] += 1
             for k in kcats_here:
@@ -209,6 +211,7 @@ def main():
             "s": short,
             "y": int(row["year"]),
             "n": n_sents,
+            "active_sentences": active_sents,
             "v": dict(vcat_n),
             "k": dict(kcat_n),
             "c": {f"{v}|{k}": n for (v, k), n in cell_n.items()},

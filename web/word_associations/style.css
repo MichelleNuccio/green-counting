@@ -97,7 +97,7 @@ body {
 
 /* Set page backgrounds and use a dark surface when dark mode is active. */
 body {
-  background: #f2f2ef;
+  background: #1a1a1a;
 }
 
 @media (prefers-color-scheme: dark) {

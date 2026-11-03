@@ -30,7 +30,7 @@
   const CORPUS_PANELS = [
     { row: 0, column: 0, macroCategory: "Design Studio" },
     { row: 0, column: 1, macroCategory: "Professional Practice" },
-    { row: 1, column: 0, macroCategory: "Technology & Representation" },
+    { row: 1, column: 0, macroCategory: "Technology & Media" },
     { row: 1, column: 1, macroCategory: "History & Theory" },
   ].map((panel) => ({
     ...panel,
@@ -115,7 +115,10 @@
 
   function normalizePdfFilename(filename) {
     const basename = filename.trim().split(/[\\/]/).pop();
-    return basename.replace(/\.pdf$/i, "");
+    return basename
+      .replace(/\.pdf$/i, "")
+      .replace(/-(\d+)-nb$/i, "-$1nb")
+      .replace(/-(\d)nb$/i, "-0$1nb");
   }
 
   function aggregateSyllabi(syllabi) {
@@ -183,6 +186,7 @@
       const row = parseCsvRow(lines[index], lineNumber);
       if (row.length !== 2 || !row[0] || !row[1])
         throw new Error(`Expected a filename and category on line ${lineNumber}.`);
+      if (row[1] === "-") continue;
       const filename = normalizePdfFilename(row[0]);
       if (!MACRO_CATEGORY_NAMES.has(row[1]))
         throw new Error(`Unknown macro-category "${row[1]}" on line ${lineNumber}.`);

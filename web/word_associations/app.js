@@ -29,8 +29,8 @@
   const KW_CATS = D.kw_cats.filter((k) => !HIDDEN_KW_CATS.has(k)).sort();
   const CORPUS_PANELS = [
     { row: 0, column: 0, macroCategory: "Design Studio" },
-    { row: 0, column: 1, macroCategory: "Professional Practice" },
-    { row: 1, column: 0, macroCategory: "Technology & Representation" },
+    { row: 0, column: 1, macroCategory: "Architectural Practice" },
+    { row: 1, column: 0, macroCategory: "Technology & Media" },
     { row: 1, column: 1, macroCategory: "History & Theory" },
   ].map((panel) => ({
     ...panel,
@@ -115,7 +115,10 @@
 
   function normalizePdfFilename(filename) {
     const basename = filename.trim().split(/[\\/]/).pop();
-    return basename.replace(/\.pdf$/i, "");
+    return basename
+      .replace(/\.pdf$/i, "")
+      .replace(/-(\d+)-nb$/i, "-$1nb")
+      .replace(/-(\d)nb$/i, "-0$1nb");
   }
 
   function aggregateSyllabi(syllabi) {
@@ -176,6 +179,7 @@
       D.syllabi.map((syllabus) => [normalizePdfFilename(syllabus.t), syllabus]),
     );
     const categoriesByFilename = new Map();
+    const unmatchedFilenames = [];
     let assignmentCount = 0;
     for (let index = 0; index < lines.length; index++) {
       if (!lines[index].trim()) continue;
@@ -183,17 +187,25 @@
       const row = parseCsvRow(lines[index], lineNumber);
       if (row.length !== 2 || !row[0] || !row[1])
         throw new Error(`Expected a filename and category on line ${lineNumber}.`);
+      if (row[1] === "-") continue;
       const filename = normalizePdfFilename(row[0]);
       if (!MACRO_CATEGORY_NAMES.has(row[1]))
         throw new Error(`Unknown macro-category "${row[1]}" on line ${lineNumber}.`);
-      if (!syllabiByFilename.has(filename))
-        throw new Error(`PDF "${row[0]}" on line ${lineNumber} is not in the loaded syllabus data.`);
+      if (!syllabiByFilename.has(filename)) {
+        unmatchedFilenames.push(row[0]);
+        continue;
+      }
       if (categoriesByFilename.has(filename))
         throw new Error(`Duplicate PDF "${row[0]}" on line ${lineNumber}.`);
       categoriesByFilename.set(filename, row[1]);
       assignmentCount++;
     }
     if (!assignmentCount) throw new Error("macro-categories.csv contains no PDF assignments.");
+    if (unmatchedFilenames.length)
+      console.warn(
+        "Ignoring macro-category assignments for PDFs absent from the loaded syllabus data.",
+        unmatchedFilenames,
+      );
 
     for (const panel of CORPUS_PANELS) {
       panel.syllabi = D.syllabi.filter((syllabus) =>

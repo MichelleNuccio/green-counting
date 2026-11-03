@@ -3,11 +3,3 @@ data/
 .claude
 __pycache__/
 web/protect/.password
-
-# Keep the macro-category mapping versioned while ignoring the other data files.
-!data/
-data/*
-!data/macro-categories.csv
-!docs/data/
-docs/data/*
-!docs/data/macro-categories.csv

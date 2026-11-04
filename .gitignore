@@ -5,3 +5,4 @@ __pycache__/
 web/protect/.password
 # Local plaintext template for the encrypted Cloud Associations page
 web/cloud_associations/.private/
+web/word_associations/.private/
